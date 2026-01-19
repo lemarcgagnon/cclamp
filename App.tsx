@@ -3,12 +3,22 @@ import Viewer from './components/Viewer';
 import Controls from './components/Controls';
 import { ClampParams, DEFAULT_PARAMS } from './types';
 import { downloadSTL } from './utils/exporter';
-import { generateFrameGeometry } from './utils/geometry';
+import { generateFrameGeometry, initManifold, isManifoldReady } from './utils/geometry';
 import * as THREE from 'three';
 
 const App: React.FC = () => {
   const [params, setParams] = useState<ClampParams>(DEFAULT_PARAMS);
   const [showScrew, setShowScrew] = useState(true);
+  const [manifoldReady, setManifoldReady] = useState(false);
+
+  // Initialize manifold-3d WASM on startup
+  useEffect(() => {
+    initManifold().then(() => {
+      setManifoldReady(true);
+    }).catch(err => {
+      console.error('Failed to initialize manifold-3d:', err);
+    });
+  }, []);
 
   const meshRefs = useRef<{ frame: THREE.Mesh | null, screw: THREE.Mesh | null }>({ frame: null, screw: null });
 
@@ -76,6 +86,18 @@ const App: React.FC = () => {
     downloadSTL(screwClone, `c-clamp-screw-${params.screwRadius}mm.stl`);
   };
 
+  if (!manifoldReady) {
+    return (
+      <div className="relative w-full h-screen overflow-hidden bg-gray-900 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-blue-500 mx-auto mb-4"></div>
+          <p className="text-white text-lg">Loading Manifold-3D Engine...</p>
+          <p className="text-gray-500 text-sm mt-2">Initializing WASM module for guaranteed manifold geometry</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="relative w-full h-screen overflow-hidden">
       <Viewer
@@ -91,11 +113,11 @@ const App: React.FC = () => {
         onExportAssembled={handleExportAssembled}
         onExportSeparated={handleExportSeparated}
       />
-      
+
       <div className="absolute top-4 left-4 pointer-events-none opacity-50">
         <div className="text-white text-xs font-mono">
-          REACT THREE FIBER EXPORTER <br/>
-          v1.2.0 (Stable Core)
+          MANIFOLD-3D C-CLAMP STUDIO <br/>
+          v2.0.0 (Guaranteed Manifold)
         </div>
       </div>
     </div>
