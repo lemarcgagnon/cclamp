@@ -193,6 +193,7 @@ function generateThreadedHoleCutter(
 /**
  * Generates a MANIFOLD Threaded Screw Geometry suitable for 3D printing
  * Uses CSG UNION operations to create a watertight solid mesh
+ * Based on real C-clamp design: flat pad at bottom, T-handle with knobs at top
  */
 export const generateScrewGeometry = (params: ClampParams): THREE.BufferGeometry => {
   const { screwRadius, screwLength, threadPitch, quality } = params;
@@ -204,50 +205,58 @@ export const generateScrewGeometry = (params: ClampParams): THREE.BufferGeometry
     const evaluator = new Evaluator();
     evaluator.attributes = ['position', 'normal'];
 
-    // 1. Main screw shaft (solid cylinder)
-    const shaftGeo = new THREE.CylinderGeometry(screwRadius, screwRadius, screwLength, segments);
-    shaftGeo.translate(0, screwLength / 2, 0);
-    let resultBrush = new Brush(shaftGeo, csgMaterial);
+    // 1. FLAT PRESSURE PAD at bottom (like real C-clamp)
+    // This is the base - screw shaft extends UP from here
+    const padRadius = screwRadius * 1.6;
+    const padThickness = 4;
+    const padGeo = new THREE.CylinderGeometry(padRadius, padRadius, padThickness, segments);
+    padGeo.translate(0, padThickness / 2, 0);
+    let resultBrush = new Brush(padGeo, csgMaterial);
     resultBrush.updateMatrixWorld();
 
-    // 2. T-Handle at top
-    const handleLength = screwRadius * 5;
-    const handleRadius = screwRadius * 0.6;
+    // 2. Main screw shaft (solid cylinder) - extends from pad upward
+    const shaftGeo = new THREE.CylinderGeometry(screwRadius, screwRadius, screwLength, segments);
+    shaftGeo.translate(0, padThickness + screwLength / 2, 0);
+    const shaftBrush = new Brush(shaftGeo, csgMaterial);
+    shaftBrush.updateMatrixWorld();
+    resultBrush = evaluator.evaluate(resultBrush, shaftBrush, ADDITION);
 
-    // Handle bar
+    // 3. T-HANDLE at top with spherical knobs at ends
+    const handleLength = screwRadius * 6;
+    const handleRadius = screwRadius * 0.5;
+    const handleY = padThickness + screwLength + handleRadius * 2;
+
+    // Handle bar (horizontal)
     const handleBarGeo = new THREE.CylinderGeometry(handleRadius, handleRadius, handleLength, segments);
     handleBarGeo.rotateZ(Math.PI / 2);
-    handleBarGeo.translate(0, screwLength + handleRadius * 2, 0);
+    handleBarGeo.translate(0, handleY, 0);
     const handleBrush = new Brush(handleBarGeo, csgMaterial);
     handleBrush.updateMatrixWorld();
     resultBrush = evaluator.evaluate(resultBrush, handleBrush, ADDITION);
 
-    // Handle collar (connects handle to shaft)
-    const collarGeo = new THREE.CylinderGeometry(screwRadius * 1.1, screwRadius * 1.1, handleRadius * 3, segments);
-    collarGeo.translate(0, screwLength + handleRadius, 0);
+    // Handle collar (connects shaft to handle bar)
+    const collarGeo = new THREE.CylinderGeometry(screwRadius * 1.0, screwRadius * 1.0, handleRadius * 4, segments);
+    collarGeo.translate(0, padThickness + screwLength + handleRadius, 0);
     const collarBrush = new Brush(collarGeo, csgMaterial);
     collarBrush.updateMatrixWorld();
     resultBrush = evaluator.evaluate(resultBrush, collarBrush, ADDITION);
 
-    // 3. Pressure pad at bottom
-    const padRadius = screwRadius * 1.8;
-    const padThickness = 4;
-    const padGeo = new THREE.CylinderGeometry(padRadius, padRadius, padThickness, segments);
-    padGeo.translate(0, -padThickness / 2 - 1, 0);
-    const padBrush = new Brush(padGeo, csgMaterial);
-    padBrush.updateMatrixWorld();
-    resultBrush = evaluator.evaluate(resultBrush, padBrush, ADDITION);
+    // Spherical knobs at handle ends (like reference image)
+    const knobRadius = handleRadius * 1.8;
+    const knobGeo1 = new THREE.SphereGeometry(knobRadius, segments, segments / 2);
+    knobGeo1.translate(-handleLength / 2, handleY, 0);
+    const knobBrush1 = new Brush(knobGeo1, csgMaterial);
+    knobBrush1.updateMatrixWorld();
+    resultBrush = evaluator.evaluate(resultBrush, knobBrush1, ADDITION);
 
-    // 4. Connector sphere between shaft and pad
-    const connectorGeo = new THREE.SphereGeometry(screwRadius * 1.2, segments, segments / 2);
-    connectorGeo.translate(0, 0, 0);
-    const connectorBrush = new Brush(connectorGeo, csgMaterial);
-    connectorBrush.updateMatrixWorld();
-    resultBrush = evaluator.evaluate(resultBrush, connectorBrush, ADDITION);
+    const knobGeo2 = new THREE.SphereGeometry(knobRadius, segments, segments / 2);
+    knobGeo2.translate(handleLength / 2, handleY, 0);
+    const knobBrush2 = new Brush(knobGeo2, csgMaterial);
+    knobBrush2.updateMatrixWorld();
+    resultBrush = evaluator.evaluate(resultBrush, knobBrush2, ADDITION);
 
-    // 5. Cut thread grooves into the shaft using SUBTRACTION
-    // Create helical groove cutter
-    const threadGrooveGeo = createThreadGrooves(screwRadius, screwLength, threadPitch, segments);
+    // 4. Cut thread grooves into the shaft using SUBTRACTION
+    const threadGrooveGeo = createThreadGrooves(screwRadius, screwLength, threadPitch, segments, padThickness);
     if (threadGrooveGeo) {
       const threadBrush = new Brush(threadGrooveGeo, csgMaterial);
       threadBrush.updateMatrixWorld();
@@ -275,11 +284,11 @@ function createThreadGrooves(
   radius: number,
   length: number,
   pitch: number,
-  segments: number
+  segments: number,
+  padThickness: number
 ): THREE.BufferGeometry | null {
   const grooveDepth = pitch * 0.3;
   const grooveRadius = radius + 0.1; // Slightly larger to ensure clean cut
-  const innerRadius = radius - grooveDepth;
 
   const turns = Math.floor(length / pitch);
   if (turns < 1) return null;
@@ -292,7 +301,8 @@ function createThreadGrooves(
   for (let i = 0; i <= totalPoints; i++) {
     const t = i / totalPoints;
     const angle = t * turns * Math.PI * 2;
-    const y = t * length;
+    // Y starts above the pad (padThickness) and goes up for screwLength
+    const y = padThickness + t * length;
     // Helix at the groove radius
     helixPoints.push(new THREE.Vector3(
       Math.cos(angle) * grooveRadius,
