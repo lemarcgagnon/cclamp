@@ -1,0 +1,19 @@
+clamp
+├── components
+│   ├── Controls.tsx
+│   └── Viewer.tsx
+├── utils
+│   ├── exporter.ts
+│   └── geometry.ts
+├── .env.local
+├── .gitignore
+├── App.tsx
+├── index.html
+├── index.tsx
+├── metadata.json
+├── package.json
+├── README.md
+├── tree.py
+├── tsconfig.json
+├── types.ts
+└── vite.config.ts

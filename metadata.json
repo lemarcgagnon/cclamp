@@ -1,0 +1,5 @@
+{
+  "name": "Pro C-Clamp Generator",
+  "description": "Parametric 3D printable C-Clamp generator. Customize dimensions, screw tolerance, and export STL files for manufacturing.",
+  "requestFramePermissions": []
+}
