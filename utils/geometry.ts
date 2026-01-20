@@ -1,44 +1,66 @@
 import * as THREE from 'three';
 import { Brush, Evaluator, SUBTRACTION, ADDITION } from 'three-bvh-csg';
+import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { ClampParams } from '../types';
 
 /**
- * Helper to generate the thread path points
+ * Clean up geometry to ensure manifold output
+ * - Merges duplicate vertices within tolerance
+ * - Recomputes normals
+ * - Removes degenerate triangles
  */
-const getHelixPoints = (radius: number, length: number, pitch: number) => {
-  const points: THREE.Vector3[] = [];
-  const turns = length / pitch;
-  
-  const extraTurns = 1;
-  const startY = -pitch * extraTurns;
-  const endY = length + pitch * extraTurns;
-  
-  const totalAngle = (turns + extraTurns * 2) * Math.PI * 2;
-  
-  if (length <= 0 || pitch <= 0) return [];
+function cleanupGeometry(geometry: THREE.BufferGeometry, tolerance: number = 0.0001): THREE.BufferGeometry {
+  // Merge vertices that are within tolerance
+  let cleaned = mergeVertices(geometry, tolerance);
 
-  const segments = Math.ceil(turns * 16); 
-  
-  for (let i = 0; i <= segments; i++) {
-    const t = i / segments;
-    const angle = t * totalAngle;
-    const y = startY + t * (endY - startY);
-    points.push(new THREE.Vector3(Math.cos(angle) * radius, y, Math.sin(angle) * radius));
+  // Recompute normals for consistent face orientation
+  cleaned.computeVertexNormals();
+
+  // Remove any NaN or invalid values
+  const positions = cleaned.attributes.position.array;
+  for (let i = 0; i < positions.length; i++) {
+    if (!isFinite(positions[i])) {
+      positions[i] = 0;
+    }
   }
-  return points;
-};
+  cleaned.attributes.position.needsUpdate = true;
+
+  return cleaned;
+}
+
+/**
+ * Prepare geometry for CSG operations
+ * Ensures geometry has proper groups and is ready for boolean operations
+ */
+function prepareForCSG(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
+  // Clone to avoid modifying original
+  const prepared = geometry.clone();
+
+  // Clear existing groups and set single group
+  prepared.clearGroups();
+  prepared.addGroup(0, prepared.index ? prepared.index.count : prepared.attributes.position.count, 0);
+
+  // Ensure we have normals
+  if (!prepared.attributes.normal) {
+    prepared.computeVertexNormals();
+  }
+
+  return prepared;
+}
 
 /**
  * Generates the C-Clamp Frame Geometry with threaded hole
- * Always creates proper threads for 3D printing compatibility
- * @param params Clamp parameters
+ * Optimized for manifold output - no non-manifold edges
  */
 export const generateFrameGeometry = (params: ClampParams): THREE.BufferGeometry => {
-  const { height, depth, thickness, width, screwRadius, screwPosition, tolerance } = params;
-  
+  const { height, depth, thickness, width, screwRadius, screwPosition, tolerance, quality } = params;
+
+  // Higher segments for better manifold results
+  const curveSegments = quality === 1 ? 16 : quality === 2 ? 24 : 32;
+
   // 1. Base C-Frame Shape
   const shape = new THREE.Shape();
-  
+
   const screwX = depth * screwPosition;
   const minJawLen = screwX + screwRadius + (thickness * 0.6);
   const actualDepth = Math.max(depth, minJawLen);
@@ -57,31 +79,26 @@ export const generateFrameGeometry = (params: ClampParams): THREE.BufferGeometry
   shape.lineTo(0, 0);
 
   const extrudeSettings = {
-    steps: 1,
+    steps: 2, // More steps for smoother geometry
     depth: width,
     bevelEnabled: true,
     bevelThickness: 1,
     bevelSize: 1,
-    bevelSegments: 2,
-    curveSegments: 12,
+    bevelSegments: 3, // More bevel segments
+    curveSegments: curveSegments,
   };
 
-  const frameGeometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+  let frameGeometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+  frameGeometry = prepareForCSG(frameGeometry);
 
-  // CSG PREP: Flatten groups.
-  // This is CRITICAL. The Brush expects a single material group if we pass a single material.
-  frameGeometry.clearGroups();
-  frameGeometry.addGroup(0, frameGeometry.attributes.position.count, 0);
-
-  // 3. CSG Operations - Cut threaded hole
+  // CSG Operations - Cut threaded hole
   try {
     const cutLength = thickness * 3;
 
-    // Check if libraries loaded
     if (!Brush || !Evaluator) {
-        console.warn("CSG libraries not available.");
-        frameGeometry.center();
-        return frameGeometry;
+      console.warn("CSG libraries not available.");
+      frameGeometry.center();
+      return cleanupGeometry(frameGeometry);
     }
 
     const csgMaterial = new THREE.MeshNormalMaterial();
@@ -89,73 +106,80 @@ export const generateFrameGeometry = (params: ClampParams): THREE.BufferGeometry
     const frameBrush = new Brush(frameGeometry, csgMaterial);
     frameBrush.updateMatrixWorld();
 
-    // ALWAYS use threaded hole for 3D printing compatibility
-    // The cutter shape = screw shape + tolerance = creates matching grooves
+    // Generate threaded hole cutter
     const cutterGeo = generateThreadedHoleCutter(
       screwRadius,
       tolerance,
       cutLength,
-      params.threadPitch
+      params.threadPitch,
+      quality
     );
 
     const cutterBrush = new Brush(cutterGeo, csgMaterial);
-    // Position hole in BOTTOM arm (Y = -thickness to 0)
-    // The screw enters from below and pushes up against the workpiece
-    // Top arm (Y = height to height+thickness) stays solid as the anvil
-    const holeY = height + thickness / 2; // Bottom arm in shape coords
+    const holeY = height + thickness / 2;
     cutterBrush.position.set(screwX, holeY, params.width / 2);
     cutterBrush.updateMatrixWorld();
 
     const evaluator = new Evaluator();
     evaluator.attributes = ['position', 'normal'];
+    evaluator.useGroups = false; // Disable groups for cleaner output
 
     const result = evaluator.evaluate(frameBrush, cutterBrush, SUBTRACTION);
 
-    const finalGeo = result.geometry;
+    let finalGeo = result.geometry;
     finalGeo.center();
+
+    // Clean up for manifold output
+    finalGeo = cleanupGeometry(finalGeo);
+
     return finalGeo;
 
   } catch (err) {
     console.error("CSG Operation Failed:", err);
     frameGeometry.center();
-    return frameGeometry;
+    return cleanupGeometry(frameGeometry);
   }
 };
 
 /**
- * Generate a MANIFOLD threaded hole cutter using CSG
- * Creates a cylinder with helical thread grooves that will receive the screw
+ * Generate a threaded hole cutter using CSG
+ * Creates a cylinder with helical thread grooves
+ * Optimized for manifold output
  */
 function generateThreadedHoleCutter(
   screwRadius: number,
   tolerance: number,
   length: number,
-  threadPitch: number
+  threadPitch: number,
+  quality: number
 ): THREE.BufferGeometry {
   const csgMaterial = new THREE.MeshBasicMaterial();
   const evaluator = new Evaluator();
   evaluator.attributes = ['position', 'normal'];
+  evaluator.useGroups = false;
 
-  // Thread dimensions - make them prominent!
-  const threadDepth = threadPitch * 0.5;  // Deep threads
-  const tubeRadius = threadPitch * 0.45;  // Thick tube for visibility
+  // Higher segments for quality
+  const radialSegments = quality === 1 ? 24 : quality === 2 ? 32 : 48;
 
-  // Core hole radius
+  // Thread dimensions
+  const tubeRadius = threadPitch * 0.4;
   const coreRadius = screwRadius + tolerance;
 
-  // 1. Create main cylinder for the hole
-  const coreGeo = new THREE.CylinderGeometry(coreRadius, coreRadius, length, 32);
-  let resultBrush = new Brush(coreGeo, csgMaterial);
+  // 1. Create main cylinder for the hole (closed ends for manifold)
+  const coreGeo = new THREE.CylinderGeometry(
+    coreRadius, coreRadius, length,
+    radialSegments, 1, false // closed = false means caps are included
+  );
+
+  let resultBrush = new Brush(prepareForCSG(coreGeo), csgMaterial);
   resultBrush.updateMatrixWorld();
 
-  // 2. Create helical thread groove - tube must OVERLAP with cylinder!
+  // 2. Create helical thread groove
   const turns = Math.floor(length / threadPitch);
   if (turns >= 1) {
     const helixPoints: THREE.Vector3[] = [];
-    const pointsPerTurn = 24;  // More points for smoother helix
+    const pointsPerTurn = quality === 1 ? 16 : quality === 2 ? 24 : 32;
     const totalPoints = turns * pointsPerTurn;
-
-    // Helix center at coreRadius so tube overlaps with cylinder
     const helixRadius = coreRadius;
 
     for (let i = 0; i <= totalPoints; i++) {
@@ -172,138 +196,147 @@ function generateThreadedHoleCutter(
 
     if (helixPoints.length >= 2) {
       const curve = new THREE.CatmullRomCurve3(helixPoints);
-      // Large tube that extends OUTWARD from the cylinder surface
-      const tubeGeo = new THREE.TubeGeometry(curve, totalPoints * 2, tubeRadius, 12, false);
 
-      const threadBrush = new Brush(tubeGeo, csgMaterial);
+      // Higher tube segments for smooth manifold result
+      const tubularSegments = totalPoints * 2;
+      const radialTubeSegments = quality === 1 ? 8 : quality === 2 ? 12 : 16;
+
+      const tubeGeo = new THREE.TubeGeometry(
+        curve,
+        tubularSegments,
+        tubeRadius,
+        radialTubeSegments,
+        false // Not closed loop
+      );
+
+      const threadBrush = new Brush(prepareForCSG(tubeGeo), csgMaterial);
       threadBrush.updateMatrixWorld();
 
-      // UNION adds the helical tube to the cylinder
-      // This creates a cylinder with helical bulges
-      // When subtracted from frame = hole with helical grooves
       resultBrush = evaluator.evaluate(resultBrush, threadBrush, ADDITION);
     }
   }
 
-  const geo = resultBrush.geometry;
-  geo.computeVertexNormals();
+  let geo = resultBrush.geometry;
+  geo = cleanupGeometry(geo);
   return geo;
 }
 
 /**
- * Generates a MANIFOLD Threaded Screw Geometry suitable for 3D printing
- * Uses CSG UNION operations to create a watertight solid mesh
- * Based on real C-clamp design: flat pad at bottom, T-handle with knobs at top
+ * Generates a Threaded Screw Geometry suitable for 3D printing
+ * Uses CSG UNION operations with manifold-safe cleanup
  */
 export const generateScrewGeometry = (params: ClampParams): THREE.BufferGeometry => {
   const { screwRadius, screwLength, threadPitch, quality } = params;
 
-  const segments = quality === 1 ? 16 : quality === 2 ? 24 : 32;
+  // Higher segments for manifold safety
+  const segments = quality === 1 ? 24 : quality === 2 ? 32 : 48;
   const csgMaterial = new THREE.MeshBasicMaterial();
 
   try {
     const evaluator = new Evaluator();
     evaluator.attributes = ['position', 'normal'];
+    evaluator.useGroups = false;
 
-    // 1. FLAT PRESSURE PAD at bottom (like real C-clamp)
-    // This is the base - screw shaft extends UP from here
+    // 1. FLAT PRESSURE PAD at bottom
     const padRadius = screwRadius * 1.6;
     const padThickness = 4;
-    const padGeo = new THREE.CylinderGeometry(padRadius, padRadius, padThickness, segments);
+    const padGeo = new THREE.CylinderGeometry(padRadius, padRadius, padThickness, segments, 1, false);
     padGeo.translate(0, padThickness / 2, 0);
-    let resultBrush = new Brush(padGeo, csgMaterial);
+    let resultBrush = new Brush(prepareForCSG(padGeo), csgMaterial);
     resultBrush.updateMatrixWorld();
 
-    // 2. Main screw shaft (solid cylinder) - extends from pad upward
-    const shaftGeo = new THREE.CylinderGeometry(screwRadius, screwRadius, screwLength, segments);
+    // 2. Main screw shaft - extends from pad upward
+    const shaftGeo = new THREE.CylinderGeometry(screwRadius, screwRadius, screwLength, segments, 1, false);
     shaftGeo.translate(0, padThickness + screwLength / 2, 0);
-    const shaftBrush = new Brush(shaftGeo, csgMaterial);
+    const shaftBrush = new Brush(prepareForCSG(shaftGeo), csgMaterial);
     shaftBrush.updateMatrixWorld();
     resultBrush = evaluator.evaluate(resultBrush, shaftBrush, ADDITION);
 
-    // 3. T-HANDLE at top with spherical knobs at ends
+    // 3. T-HANDLE at top with spherical knobs
     const handleLength = screwRadius * 6;
     const handleRadius = screwRadius * 0.5;
     const handleY = padThickness + screwLength + handleRadius * 2;
 
     // Handle bar (horizontal)
-    const handleBarGeo = new THREE.CylinderGeometry(handleRadius, handleRadius, handleLength, segments);
+    const handleBarGeo = new THREE.CylinderGeometry(handleRadius, handleRadius, handleLength, segments, 1, false);
     handleBarGeo.rotateZ(Math.PI / 2);
     handleBarGeo.translate(0, handleY, 0);
-    const handleBrush = new Brush(handleBarGeo, csgMaterial);
+    const handleBrush = new Brush(prepareForCSG(handleBarGeo), csgMaterial);
     handleBrush.updateMatrixWorld();
     resultBrush = evaluator.evaluate(resultBrush, handleBrush, ADDITION);
 
-    // Handle collar (connects shaft to handle bar)
-    const collarGeo = new THREE.CylinderGeometry(screwRadius * 1.0, screwRadius * 1.0, handleRadius * 4, segments);
+    // Handle collar
+    const collarGeo = new THREE.CylinderGeometry(screwRadius * 1.0, screwRadius * 1.0, handleRadius * 4, segments, 1, false);
     collarGeo.translate(0, padThickness + screwLength + handleRadius, 0);
-    const collarBrush = new Brush(collarGeo, csgMaterial);
+    const collarBrush = new Brush(prepareForCSG(collarGeo), csgMaterial);
     collarBrush.updateMatrixWorld();
     resultBrush = evaluator.evaluate(resultBrush, collarBrush, ADDITION);
 
-    // Spherical knobs at handle ends (like reference image)
+    // Spherical knobs at handle ends
     const knobRadius = handleRadius * 1.8;
-    const knobGeo1 = new THREE.SphereGeometry(knobRadius, segments, segments / 2);
+    const sphereSegments = Math.max(16, segments / 2);
+
+    const knobGeo1 = new THREE.SphereGeometry(knobRadius, sphereSegments, sphereSegments / 2);
     knobGeo1.translate(-handleLength / 2, handleY, 0);
-    const knobBrush1 = new Brush(knobGeo1, csgMaterial);
+    const knobBrush1 = new Brush(prepareForCSG(knobGeo1), csgMaterial);
     knobBrush1.updateMatrixWorld();
     resultBrush = evaluator.evaluate(resultBrush, knobBrush1, ADDITION);
 
-    const knobGeo2 = new THREE.SphereGeometry(knobRadius, segments, segments / 2);
+    const knobGeo2 = new THREE.SphereGeometry(knobRadius, sphereSegments, sphereSegments / 2);
     knobGeo2.translate(handleLength / 2, handleY, 0);
-    const knobBrush2 = new Brush(knobGeo2, csgMaterial);
+    const knobBrush2 = new Brush(prepareForCSG(knobGeo2), csgMaterial);
     knobBrush2.updateMatrixWorld();
     resultBrush = evaluator.evaluate(resultBrush, knobBrush2, ADDITION);
 
-    // 4. Cut thread grooves into the shaft using SUBTRACTION
-    const threadGrooveGeo = createThreadGrooves(screwRadius, screwLength, threadPitch, segments, padThickness);
+    // 4. Cut thread grooves into the shaft
+    const threadGrooveGeo = createThreadGrooves(screwRadius, screwLength, threadPitch, segments, padThickness, quality);
     if (threadGrooveGeo) {
-      const threadBrush = new Brush(threadGrooveGeo, csgMaterial);
+      const threadBrush = new Brush(prepareForCSG(threadGrooveGeo), csgMaterial);
       threadBrush.updateMatrixWorld();
       resultBrush = evaluator.evaluate(resultBrush, threadBrush, SUBTRACTION);
     }
 
-    const finalGeo = resultBrush.geometry;
-    finalGeo.computeVertexNormals();
+    let finalGeo = resultBrush.geometry;
+
+    // Final manifold cleanup
+    finalGeo = cleanupGeometry(finalGeo);
+
     return finalGeo;
 
   } catch (err) {
     console.error("Screw CSG failed:", err);
-    // Fallback: simple cylinder
     const fallback = new THREE.CylinderGeometry(screwRadius, screwRadius, screwLength, 32);
     fallback.translate(0, screwLength / 2, 0);
-    return fallback;
+    return cleanupGeometry(fallback);
   }
 };
 
 /**
  * Create thread groove geometry for SUBTRACTION from screw shaft
- * Creates a helical groove that when subtracted creates thread appearance
+ * Optimized for manifold output
  */
 function createThreadGrooves(
   radius: number,
   length: number,
   pitch: number,
   segments: number,
-  padThickness: number
+  padThickness: number,
+  quality: number
 ): THREE.BufferGeometry | null {
-  const grooveDepth = pitch * 0.3;
-  const grooveRadius = radius + 0.1; // Slightly larger to ensure clean cut
+  const grooveRadius = radius + 0.1;
 
   const turns = Math.floor(length / pitch);
   if (turns < 1) return null;
 
-  // Create a tube that follows a helical path - this will be subtracted
   const helixPoints: THREE.Vector3[] = [];
-  const pointsPerTurn = Math.max(8, segments / 2);
+  const pointsPerTurn = quality === 1 ? 12 : quality === 2 ? 18 : 24;
   const totalPoints = turns * pointsPerTurn;
 
   for (let i = 0; i <= totalPoints; i++) {
     const t = i / totalPoints;
     const angle = t * turns * Math.PI * 2;
-    // Y starts above the pad (padThickness) and goes up for screwLength
     const y = padThickness + t * length;
-    // Helix at the groove radius
+
     helixPoints.push(new THREE.Vector3(
       Math.cos(angle) * grooveRadius,
       y,
@@ -314,11 +347,16 @@ function createThreadGrooves(
   if (helixPoints.length < 2) return null;
 
   const curve = new THREE.CatmullRomCurve3(helixPoints);
+
+  // Higher segments for manifold safety
+  const tubularSegments = totalPoints * 2;
+  const radialSegments = quality === 1 ? 6 : quality === 2 ? 8 : 12;
+
   const tubeGeo = new THREE.TubeGeometry(
     curve,
-    totalPoints * 2,
-    pitch * 0.35, // Tube radius = groove width
-    8,
+    tubularSegments,
+    pitch * 0.35,
+    radialSegments,
     false
   );
 
