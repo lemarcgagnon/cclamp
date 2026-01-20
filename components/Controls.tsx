@@ -9,6 +9,8 @@ interface ControlsProps {
   setShowScrew: React.Dispatch<React.SetStateAction<boolean>>;
   onExportAssembled: () => void;
   onExportSeparated: () => void;
+  onExport3MFAssembled: () => void;
+  onExport3MFSeparated: () => void;
 }
 
 const Slider = ({ label, value, min, max, step, onChange, highlight = false }: { label: string, value: number, min: number, max: number, step: number, onChange: (val: number) => void, highlight?: boolean }) => (
@@ -29,7 +31,7 @@ const Slider = ({ label, value, min, max, step, onChange, highlight = false }: {
   </div>
 );
 
-const Controls: React.FC<ControlsProps> = ({ params, setParams, showScrew, setShowScrew, onExportAssembled, onExportSeparated }) => {
+const Controls: React.FC<ControlsProps> = ({ params, setParams, showScrew, setShowScrew, onExportAssembled, onExportSeparated, onExport3MFAssembled, onExport3MFSeparated }) => {
 
   const update = (key: keyof ClampParams, value: number) => {
     setParams(prev => ({ ...prev, [key]: value }));
@@ -130,19 +132,36 @@ const Controls: React.FC<ControlsProps> = ({ params, setParams, showScrew, setSh
       </div>
 
       <div className="mt-8 space-y-3 pt-6 border-t border-gray-800">
-        <button 
-          onClick={onExportAssembled}
-          className="w-full py-3 px-4 bg-gray-700 hover:bg-gray-600 text-white rounded-lg font-medium transition-all flex items-center justify-center gap-2 border border-gray-600"
+        <p className="text-xs text-green-400 font-medium mb-2">3MF (Recommended for 3D Printing)</p>
+        <button
+          onClick={onExport3MFAssembled}
+          className="w-full py-3 px-4 bg-green-600 hover:bg-green-500 text-white rounded-lg font-medium transition-all shadow-lg shadow-green-900/50 flex items-center justify-center gap-2"
         >
           <Download size={18} />
-          Export Assembled
+          Export 3MF Assembled
         </button>
-        <button 
-          onClick={onExportSeparated}
-          className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-all shadow-lg shadow-blue-900/50 flex items-center justify-center gap-2"
+        <button
+          onClick={onExport3MFSeparated}
+          className="w-full py-3 px-4 bg-green-700 hover:bg-green-600 text-white rounded-lg font-medium transition-all flex items-center justify-center gap-2 border border-green-600"
         >
           <Download size={18} />
-          Export Parts
+          Export 3MF Parts
+        </button>
+
+        <p className="text-xs text-gray-500 font-medium mt-4 mb-2">STL (Legacy)</p>
+        <button
+          onClick={onExportAssembled}
+          className="w-full py-2 px-4 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-sm transition-all flex items-center justify-center gap-2 border border-gray-600"
+        >
+          <Download size={16} />
+          Export STL Assembled
+        </button>
+        <button
+          onClick={onExportSeparated}
+          className="w-full py-2 px-4 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-sm transition-all flex items-center justify-center gap-2 border border-gray-600"
+        >
+          <Download size={16} />
+          Export STL Parts
         </button>
       </div>
     </div>
